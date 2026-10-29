@@ -1,4 +1,11 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react'
+import {
+  hourPackages,
+  initialSubscription,
+  HourPackage,
+  SubscriptionManager,
+  SubscriptionState,
+} from './subscriptionManager'
 
 type Role = 'client' | 'admin'
 type Page =
@@ -8,6 +15,7 @@ type Page =
   | 'checkout'
   | 'bookings'
   | 'pass'
+  | 'subscription'
   | 'admin-scan'
   | 'admin-reservations'
   | 'admin-rooms'
@@ -29,6 +37,14 @@ type Booking = {
   capacity: number
   total: number
   status: 'active' | 'refunded'
+  paymentMethod: 'card' | 'hours'
+}
+
+type PendingBooking = {
+  reference: string
+  room: Room
+  date: string
+  capacity: number
 }
 
 const defaultRooms: Room[] = [
@@ -101,6 +117,7 @@ function Shell({ role, title, subtitle, go, logout, children }: {
               <button onClick={() => go('availability')}>Disponibilidad</button>
               <button onClick={() => go('bookings')}>Reservas</button>
               <button onClick={() => go('pass')}>Mi QR</button>
+              <button onClick={() => go('subscription')}>Mi Suscripción</button>
             </>
           ) : (
             <>
@@ -292,10 +309,81 @@ function Bookings({ booking, cancel, go, logout }: { booking: Booking | null; ca
   )
 }
 
-function Checkout({ pending, complete, go }: { pending: { room: Room; date: string; capacity: number } | null; complete: (total: number) => void; go: (page: Page) => void }) {
+function SubscriptionDashboard({ subscription, purchase, go, logout }: {
+  subscription: SubscriptionState
+  purchase: (item: HourPackage) => void
+  go: (page: Page) => void
+  logout: () => void
+}) {
+  const [selectedPackage, setSelectedPackage] = useState<HourPackage | null>(null)
+  const [processing, setProcessing] = useState(false)
+  const [confirmation, setConfirmation] = useState('')
+
+  const confirmPurchase = () => {
+    if (!selectedPackage || processing) return
+    setProcessing(true)
+    window.setTimeout(() => {
+      purchase(selectedPackage)
+      setConfirmation(`Se acreditaron ${selectedPackage.hours} horas correctamente.`)
+      setSelectedPackage(null)
+      setProcessing(false)
+    }, 450)
+  }
+
+  return (
+    <Shell role="client" title="Mi Suscripción." subtitle="Compra paquetes flexibles y controla el uso de tus horas." go={go} logout={logout}>
+      <div className="subscription-stats">
+        <article><span>Horas adquiridas</span><strong>{subscription.purchasedHours} h</strong></article>
+        <article><span>Horas consumidas</span><strong>{subscription.consumedHours} h</strong></article>
+        <article className="balance-stat"><span>Horas disponibles</span><strong>{subscription.balance} h</strong></article>
+      </div>
+      {confirmation && <div className="purchase-confirmation" role="status"><Icon name="check" /> {confirmation}</div>}
+
+      <div className="subscription-heading"><div><p className="eyebrow">Recargar saldo</p><h2>Paquetes de horas</h2></div><span>Precios de demostración</span></div>
+      <div className="package-grid">
+        {hourPackages.map((item) => (
+          <article className="package-card" key={item.id}>
+            <span className="mono-note">PAQUETE FLEXIBLE</span><strong>{item.hours}<small> horas</small></strong>
+            <p>{item.description}</p><div><b>{money.format(item.price)}</b><span>Valor demo</span></div>
+            <button className="outline-button" onClick={() => { setSelectedPackage(item); setConfirmation('') }}>Comprar paquete</button>
+          </article>
+        ))}
+      </div>
+
+      {selectedPackage && <section className="purchase-summary">
+        <div><p className="eyebrow">Resumen de compra</p><h2>Paquete de {selectedPackage.hours} horas</h2><p>Se acreditarán <strong>{selectedPackage.hours} horas</strong> por {money.format(selectedPackage.price)}.</p></div>
+        <div className="purchase-actions"><button className="text-button" disabled={processing} onClick={() => setSelectedPackage(null)}>Cancelar</button><button className="primary-button" disabled={processing} onClick={confirmPurchase}>{processing ? 'Procesando…' : 'Confirmar compra'} <span>→</span></button></div>
+      </section>}
+
+      <div className="subscription-heading history-heading"><div><p className="eyebrow">Actividad</p><h2>Historial de movimientos</h2></div></div>
+      <div className="history-wrap">
+        {subscription.movements.length === 0 ? <div className="empty-state"><p>Todavía no hay movimientos en tu suscripción.</p></div> : <table className="history-table">
+          <thead><tr><th>Fecha y hora</th><th>Tipo</th><th>Descripción</th><th>Referencia</th><th>Crédito</th><th>Débito</th><th>Saldo</th><th>Estado</th></tr></thead>
+          <tbody>{subscription.movements.map((movement) => <tr key={movement.id}>
+            <td>{new Intl.DateTimeFormat('es-ES', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(movement.createdAt))}</td>
+            <td><span className={`movement-tag ${movement.type}`}>{movement.type === 'credit' ? 'Recarga' : 'Consumo'}</span></td>
+            <td>{movement.description}</td><td>{movement.reference}</td><td className="credit-value">{movement.type === 'credit' ? `+${movement.hours} h` : '—'}</td><td className="debit-value">{movement.type === 'debit' ? `−${movement.hours} h` : '—'}</td><td>{movement.resultingBalance} h</td><td>Completada</td>
+          </tr>)}</tbody>
+        </table>}
+      </div>
+    </Shell>
+  )
+}
+
+function Checkout({ pending, subscription, complete, go }: {
+  pending: PendingBooking | null
+  subscription: SubscriptionState
+  complete: (total: number, paymentMethod: 'card' | 'hours') => boolean
+  go: (page: Page) => void
+}) {
   const [selected, setSelected] = useState<string[]>([])
+  const [paymentMethod, setPaymentMethod] = useState<'card' | 'hours'>('card')
+  const [error, setError] = useState('')
+  const [processing, setProcessing] = useState(false)
   const services = pending?.room.services ?? []
   const total = useMemo(() => 30 + selected.reduce((sum, service) => sum + (servicePrices[service] ?? 0), 0), [selected])
+  const duration = pending ? SubscriptionManager.calculateDuration(pending.room.slot) : 0
+  const enoughHours = SubscriptionManager.canDebit(subscription, duration)
   if (!pending) return <main className="success-shell"><EmptyBooking go={go} /></main>
   return (
     <main className="page-shell">
@@ -303,18 +391,40 @@ function Checkout({ pending, complete, go }: { pending: { room: Room; date: stri
       <div className="checkout-wrap">
         <button className="back-link button-link" onClick={() => go('availability')}><Icon name="arrow" /> Volver a disponibilidad</button>
         <div className="intro"><p className="eyebrow">Finalizar reserva</p><h1>Confirma tu espacio.</h1><p>Sala {pending.room.name} · {pending.room.slot} · {pending.capacity} personas</p></div>
-        <form className="checkout-grid" onSubmit={(e) => { e.preventDefault(); complete(total) }}>
+        <form className="checkout-grid" onSubmit={(e) => {
+          e.preventDefault()
+          if (processing) return
+          if (paymentMethod === 'hours' && !enoughHours) {
+            setError(`Saldo insuficiente: tienes ${subscription.balance} h y necesitas ${duration} h.`)
+            return
+          }
+          setProcessing(true)
+          if (!complete(total, paymentMethod)) {
+            setError('No fue posible confirmar la reserva. No se realizó ningún cargo.')
+            setProcessing(false)
+          }
+        }}>
           <section className="left-column">
             <div className="section-heading"><span>01</span><div><h2>Servicios de la sala</h2><p>Amplía tu reserva.</p></div></div>
             <div className="extras-list">
               {services.length === 0 && <p className="form-lead">Esta sala no ofrece servicios adicionales.</p>}
               {services.map((service) => { const checked = selected.includes(service); return <button className={`extra-option ${checked ? 'selected' : ''}`} key={service} type="button" onClick={() => setSelected((current) => checked ? current.filter((item) => item !== service) : [...current, service])}><span className="checkbox">{checked && <Icon name="check" />}</span><span className="extra-copy"><strong>{service}</strong><small>Disponible para esta sala</small></span><span className="extra-price">+{money.format(servicePrices[service] ?? 0)}</span></button> })}
             </div>
-            <div className="section-heading payment-heading"><span>02</span><div><h2>Datos de pago</h2><p>Datos simulados para completar la prueba.</p></div></div>
-            <div className="field"><label htmlFor="card">Número de tarjeta</label><input id="card" required placeholder="0000 0000 0000 0000" /></div>
-            <div className="field-row"><div className="field"><label htmlFor="expiry">Caducidad</label><input id="expiry" required placeholder="MM / AA" /></div><div className="field"><label htmlFor="cvc">CVC</label><input id="cvc" required placeholder="•••" /></div></div>
+            <div className="section-heading payment-heading"><span>02</span><div><h2>Método de pago</h2><p>Elige cómo quieres confirmar tu reserva.</p></div></div>
+            <div className="payment-methods">
+              <button type="button" className={paymentMethod === 'card' ? 'active' : ''} onClick={() => { setPaymentMethod('card'); setError('') }}><span>Tarjeta de crédito</span><small>Pago simulado actual</small></button>
+              <button type="button" className={paymentMethod === 'hours' ? 'active' : ''} onClick={() => { setPaymentMethod('hours'); setError('') }}><span>Saldo de Horas</span><small>{subscription.balance} h disponibles</small></button>
+            </div>
+            {paymentMethod === 'card' ? <>
+              <div className="field"><label htmlFor="card">Número de tarjeta</label><input id="card" required placeholder="0000 0000 0000 0000" /></div>
+              <div className="field-row"><div className="field"><label htmlFor="expiry">Caducidad</label><input id="expiry" required placeholder="MM / AA" /></div><div className="field"><label htmlFor="cvc">CVC</label><input id="cvc" required placeholder="•••" /></div></div>
+            </> : <div className={`hours-payment-summary ${enoughHours ? '' : 'insufficient'}`}>
+              <div><span>Saldo disponible</span><strong>{subscription.balance} h</strong></div><div><span>Duración de la reserva</span><strong>{duration} h</strong></div><div><span>Horas a descontar</span><strong>−{duration} h</strong></div><div><span>Saldo tras reservar</span><strong>{Math.max(0, subscription.balance - duration)} h</strong></div>
+              {!enoughHours && <p>Saldo insuficiente. Necesitas {duration} h y tienes {subscription.balance} h.</p>}
+            </div>}
+            {error && <p className="checkout-error" role="alert">{error}</p>}
           </section>
-          <aside className="summary"><p className="summary-label">Resumen de pago</p><div className="summary-title"><div><h2>Sala {pending.room.name}</h2><p>{pending.date} · {pending.room.slot}</p></div></div><div className="line-items"><div><span>Reserva de sala</span><strong>{money.format(30)}</strong></div>{selected.map((service) => <div key={service}><span>{service}</span><strong>{money.format(servicePrices[service] ?? 0)}</strong></div>)}</div><div className="total-row"><span>Total</span><strong>{money.format(total)}</strong></div><button className="primary-button" type="submit">Confirmar y pagar <span>→</span></button><p className="secure-note"><Icon name="lock" /> TRANSACCIÓN CIFRADA</p></aside>
+          <aside className="summary"><p className="summary-label">Resumen de pago</p><div className="summary-title"><div><h2>Sala {pending.room.name}</h2><p>{pending.date} · {pending.room.slot}</p></div></div><div className="line-items"><div><span>Reserva de sala</span><strong>{money.format(30)}</strong></div>{selected.map((service) => <div key={service}><span>{service}</span><strong>{money.format(servicePrices[service] ?? 0)}</strong></div>)}</div><div className="total-row"><span>{paymentMethod === 'hours' ? 'Consumo' : 'Total'}</span><strong>{paymentMethod === 'hours' ? `${duration} h` : money.format(total)}</strong></div><button className="primary-button" type="submit" disabled={processing || (paymentMethod === 'hours' && !enoughHours)}>{processing ? 'Confirmando…' : 'Confirmar y pagar'} <span>→</span></button><p className="secure-note"><Icon name="lock" /> TRANSACCIÓN CIFRADA</p></aside>
         </form>
       </div>
     </main>
@@ -373,28 +483,36 @@ export default function App() {
   const [role, setRole] = useState<Role>('client')
   const [rooms, setRooms] = useStoredState<Room[]>('workspace-rooms', defaultRooms)
   const [booking, setBooking] = useStoredState<Booking | null>('workspace-booking', null)
-  const [pending, setPending] = useState<{ room: Room; date: string; capacity: number } | null>(null)
+  const [subscription, setSubscription] = useStoredState<SubscriptionState>('workspace-subscription', initialSubscription)
+  const [pending, setPending] = useState<PendingBooking | null>(null)
 
   const go = (next: Page) => {
-    const clientOnly: Page[] = ['availability', 'checkout', 'bookings', 'pass']
+    const clientOnly: Page[] = ['availability', 'checkout', 'bookings', 'pass', 'subscription']
     const adminOnly: Page[] = ['admin-scan', 'admin-reservations', 'admin-rooms']
     if (role === 'admin' && clientOnly.includes(next)) return
     if (role === 'client' && adminOnly.includes(next)) return
     setPage(next)
   }
   const logout = () => { setPending(null); setPage('login') }
-  const complete = (total: number) => {
-    if (!pending) return
-    setBooking({ id: `WS-${Math.floor(1000 + Math.random() * 9000)}`, roomId: pending.room.id, roomName: pending.room.name, date: pending.date, slot: pending.room.slot, capacity: pending.capacity, total, status: 'active' })
+  const complete = (total: number, paymentMethod: 'card' | 'hours') => {
+    if (!pending) return false
+    if (paymentMethod === 'hours') {
+      const result = SubscriptionManager.debit(subscription, pending.room.slot, pending.reference)
+      if (!result.ok) return false
+      setSubscription(result.state)
+    }
+    setBooking({ id: pending.reference, roomId: pending.room.id, roomName: pending.room.name, date: pending.date, slot: pending.room.slot, capacity: pending.capacity, total, status: 'active', paymentMethod })
     setPending(null)
     setPage('pass')
+    return true
   }
 
   if (page === 'login') return <Login onLogin={(nextRole) => { setRole(nextRole); setPage('home') }} />
-  if (page === 'availability') return <Availability rooms={rooms} go={go} logout={logout} select={(room, date, capacity) => setPending({ room, date, capacity })} />
-  if (page === 'checkout') return <Checkout pending={pending} complete={complete} go={go} />
+  if (page === 'availability') return <Availability rooms={rooms} go={go} logout={logout} select={(room, date, capacity) => setPending({ reference: `WS-${Math.floor(1000 + Math.random() * 9000)}`, room, date, capacity })} />
+  if (page === 'checkout') return <Checkout pending={pending} subscription={subscription} complete={complete} go={go} />
   if (page === 'bookings') return <Bookings booking={booking} cancel={() => setBooking(null)} go={go} logout={logout} />
   if (page === 'pass') return <Pass booking={booking} go={go} logout={logout} />
+  if (page === 'subscription') return <SubscriptionDashboard subscription={subscription} purchase={(item) => setSubscription(SubscriptionManager.purchase(subscription, item).state)} go={go} logout={logout} />
   if (page === 'admin-scan') return <AdminScan booking={booking} go={go} logout={logout} />
   if (page === 'admin-reservations') return <AdminReservations booking={booking} refund={() => booking && setBooking({ ...booking, status: 'refunded' })} go={go} logout={logout} />
   if (page === 'admin-rooms') return <AdminRooms rooms={rooms} save={(updated) => setRooms(rooms.map((room) => room.id === updated.id ? updated : room))} go={go} logout={logout} />

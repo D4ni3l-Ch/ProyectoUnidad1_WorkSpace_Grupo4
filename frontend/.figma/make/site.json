@@ -1,0 +1,11 @@
+{
+  "title": "WorkSpace",
+  "description": "Pantalla de checkout y pago para que los clientes revisen su compra y completen el pago en una interfaz web clara en blanco y negro.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

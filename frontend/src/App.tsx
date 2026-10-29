@@ -45,6 +45,22 @@ const servicePrices: Record<string, number> = {
 
 const money = new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' })
 
+function localDateValue(date = new Date()) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function slotIsFuture(date: string, slot: Room['slot'], now = new Date()) {
+  if (date < localDateValue(now)) return false
+  if (date > localDateValue(now)) return true
+  const [hours, minutes] = slot.split('–')[0].split(':').map(Number)
+  const start = new Date(now)
+  start.setHours(hours, minutes, 0, 0)
+  return now < start
+}
+
 function useStoredState<T>(key: string, initial: T) {
   const [value, setValue] = useState<T>(() => {
     try {
@@ -183,27 +199,44 @@ function Availability({ rooms, go, logout, select }: {
   logout: () => void
   select: (room: Room, date: string, capacity: number) => void
 }) {
-  const [date, setDate] = useState('2026-03-12')
-  const [slot, setSlot] = useState<Room['slot']>('10:00–12:00')
+  const today = localDateValue()
+  const [date, setDate] = useState(today)
+  const [slot, setSlot] = useState<Room['slot']>(() =>
+    (['10:00–12:00', '18:00–20:00'] as Room['slot'][]).find((item) => slotIsFuture(today, item)) ?? '18:00–20:00',
+  )
   const [capacity, setCapacity] = useState(1)
   const [searched, setSearched] = useState(false)
+  const isPastDate = date < today
   const weekday = date ? ![0, 6].includes(new Date(`${date}T12:00:00`).getDay()) : false
-  const results = searched && weekday ? rooms.filter((room) => room.slot === slot && capacity <= room.capacity) : []
+  const availableSlots = (['10:00–12:00', '18:00–20:00'] as Room['slot'][]).filter((item) => slotIsFuture(date, item))
+  const validTime = slotIsFuture(date, slot)
+  const results = searched && weekday && !isPastDate && validTime
+    ? rooms.filter((room) => room.slot === slot && capacity <= room.capacity)
+    : []
   const dateLabel = date ? new Intl.DateTimeFormat('es-ES', { dateStyle: 'long' }).format(new Date(`${date}T12:00:00`)) : ''
 
   return (
     <Shell role="client" title="Consulta de disponibilidad." subtitle="Las salas operan de lunes a viernes en sus horarios asignados." go={go} logout={logout}>
       <section className="availability-layout">
         <form className="search-panel" onSubmit={(e) => { e.preventDefault(); setSearched(true) }}>
-          <div className="field"><label htmlFor="date">Fecha</label><input id="date" type="date" required value={date} onChange={(e) => { setDate(e.target.value); setSearched(false) }} /></div>
-          <div className="field"><label htmlFor="slot">Horario</label><select id="slot" value={slot} onChange={(e) => { setSlot(e.target.value as Room['slot']); setSearched(false) }}><option>10:00–12:00</option><option>18:00–20:00</option></select></div>
+          <div className="field"><label htmlFor="date">Fecha</label><input id="date" type="date" min={today} required value={date} onChange={(e) => {
+            const nextDate = e.target.value
+            const nextSlots = (['10:00–12:00', '18:00–20:00'] as Room['slot'][]).filter((item) => slotIsFuture(nextDate, item))
+            setDate(nextDate)
+            if (!nextSlots.includes(slot) && nextSlots[0]) setSlot(nextSlots[0])
+            setSearched(false)
+          }} /></div>
+          <div className="field"><label htmlFor="slot">Horario</label><select id="slot" value={slot} disabled={availableSlots.length === 0} onChange={(e) => { setSlot(e.target.value as Room['slot']); setSearched(false) }}><option disabled={!availableSlots.includes('10:00–12:00')}>10:00–12:00</option><option disabled={!availableSlots.includes('18:00–20:00')}>18:00–20:00</option></select></div>
           <div className="field"><label htmlFor="capacity">Aforo solicitado</label><input id="capacity" type="number" min="1" required value={capacity} onChange={(e) => { setCapacity(Math.max(1, Number(e.target.value))); setSearched(false) }} /></div>
-          <button className="primary-button" type="submit">Consultar disponibilidad <span>→</span></button>
+          <button className="primary-button" type="submit" disabled={isPastDate || availableSlots.length === 0}>Consultar disponibilidad <span>→</span></button>
         </form>
         <section className="results-panel">
           <div className="results-head"><p className="eyebrow">Resultados</p><strong>{searched ? `${results.length} disponibles` : 'Completa la búsqueda'}</strong></div>
+          {isPastDate && <div className="empty-state"><p>No es posible reservar una fecha anterior al día actual.</p></div>}
+          {!isPastDate && availableSlots.length === 0 && <div className="empty-state"><p>Todos los horarios de hoy ya comenzaron o finalizaron.</p></div>}
+          {searched && weekday && !validTime && availableSlots.length > 0 && <div className="empty-state"><p>El horario seleccionado ya comenzó. Elige un turno posterior.</p></div>}
           {searched && !weekday && <div className="empty-state"><p>Las salas solo están disponibles de lunes a viernes.</p></div>}
-          {searched && weekday && results.length === 0 && <div className="empty-state"><p>No hay salas para ese horario y aforo.</p></div>}
+          {searched && weekday && validTime && results.length === 0 && <div className="empty-state"><p>No hay salas para ese horario y aforo.</p></div>}
           <div className="space-results">
             {results.map((room) => (
               <button className="space-card selected-space" key={room.id} onClick={() => { select(room, date, capacity); go('checkout') }}>
